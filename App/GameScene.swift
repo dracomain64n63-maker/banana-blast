@@ -1,8 +1,11 @@
 
 import SpriteKit
 import UIKit
+import GameController
 
 final class GameScene: SKScene {
+
+    // MARK: - Game state
 
     private enum GameState {
         case menu
@@ -11,47 +14,147 @@ final class GameScene: SKScene {
         case gameOver
     }
 
+    private final class Enemy {
+        var x: CGFloat
+        var y: CGFloat
+        var hp: Int
+        var attackTimer: CGFloat = 0
+        let node: SKNode
+
+        init(x: CGFloat, y: CGFloat, node: SKNode) {
+            self.x = x
+            self.y = y
+            self.hp = 2
+            self.node = node
+        }
+    }
+
     private var gameState: GameState = .menu
 
+    // MARK: - Player
+
+    private var playerX: CGFloat = 2.5
+    private var playerY: CGFloat = 2.5
+    private var playerAngle: CGFloat = 0
+
+    private let fieldOfView: CGFloat = .pi / 3
+    private let mapWidth = 12
+    private let mapHeight = 12
+
+    private let gameMap: [[Int]] = [
+        [1,1,1,1,1,1,1,1,1,1,1,1],
+        [1,0,0,0,0,0,0,0,0,0,0,1],
+        [1,0,1,1,0,0,1,1,0,0,0,1],
+        [1,0,1,0,0,0,0,1,0,1,0,1],
+        [1,0,0,0,1,1,0,0,0,1,0,1],
+        [1,0,1,0,0,0,0,1,0,0,0,1],
+        [1,0,1,1,1,0,0,1,1,1,0,1],
+        [1,0,0,0,0,0,0,0,0,1,0,1],
+        [1,0,1,1,0,1,1,1,0,0,0,1],
+        [1,0,0,0,0,0,0,0,0,1,0,1],
+        [1,0,0,1,1,0,0,0,0,0,0,1],
+        [1,1,1,1,1,1,1,1,1,1,1,1]
+    ]
+
+    private var enemies: [Enemy] = []
+
+    // MARK: - Statistics
+
     private var score = 0
-    private var coins = 0
-    private var health = 3
+    private var health = 100
+    private var ammo = 30
     private var wave = 1
-    private var combo = 0
-    private var bestScore = UserDefaults.standard.integer(forKey: "bananaBlastBest")
 
-    private var monkeys: [SKNode] = []
-    private var bananas: [SKNode] = []
+    private var bestScore = UserDefaults.standard.integer(
+        forKey: "bananaBlastBest"
+    )
 
-    private var lastUpdate: TimeInterval = 0
-    private var spawnTimer: TimeInterval = 0
-    private var spawnInterval: TimeInterval = 2.0
+    // MARK: - Rendering
 
-    private var scoreLabel: SKLabelNode!
-    private var waveLabel: SKLabelNode!
-    private var healthLabel: SKLabelNode!
-    private var coinLabel: SKLabelNode!
-    private var comboLabel: SKLabelNode!
+    private var wallColumns: [SKShapeNode] = []
+    private var depthBuffer: [CGFloat] = []
+
+    private var ceilingNode: SKShapeNode!
+    private var floorNode: SKShapeNode!
+
+    private var weaponNode: SKNode!
     private var crosshair: SKShapeNode!
 
-    private var aimPoint = CGPoint.zero
+    private var scoreLabel: SKLabelNode!
+    private var healthLabel: SKLabelNode!
+    private var ammoLabel: SKLabelNode!
+    private var waveLabel: SKLabelNode!
 
-    private let jungleGreen = UIColor(red: 0.04, green: 0.20, blue: 0.11, alpha: 1)
-    private let bananaYellow = UIColor(red: 1.0, green: 0.82, blue: 0.12, alpha: 1)
+    // MARK: - Timing
+
+    private var lastUpdate: TimeInterval = 0
+    private var spawnTimer: CGFloat = 0
+    private var fireCooldown: CGFloat = 0
+    private var damageFlash: CGFloat = 0
+
+    // MARK: - Touch controls
+
+    private var movementTouch: UITouch?
+    private var lookTouch: UITouch?
+
+    private var movementOrigin = CGPoint.zero
+    private var movementVector = CGPoint.zero
+    private var lastLookPoint = CGPoint.zero
+
+    private var isTouchFiring = false
+
+    private var joystickBase: SKShapeNode!
+    private var joystickKnob: SKShapeNode!
+
+    // MARK: - Controller
+
+    private var previousFire = false
+    private var previousReload = false
+    private var previousPause = false
+    private var previousSpecial = false
+
+    // MARK: - Colors
+
+    private let bananaYellow = UIColor(
+        red: 1.0,
+        green: 0.82,
+        blue: 0.12,
+        alpha: 1
+    )
+
+    private let jungleGreen = UIColor(
+        red: 0.04,
+        green: 0.22,
+        blue: 0.10,
+        alpha: 1
+    )
+
+    // MARK: - Setup
 
     override func didMove(to view: SKView) {
-        backgroundColor = jungleGreen
         scaleMode = .resizeFill
+        backgroundColor = .black
+
+        view.ignoresSiblingOrder = true
+
         showMenu()
     }
 
-    // MARK: - Scene
-
     private func clearScene() {
         removeAllChildren()
-        monkeys.removeAll()
-        bananas.removeAll()
+
+        enemies.removeAll()
+        wallColumns.removeAll()
+        depthBuffer.removeAll()
+
+        movementTouch = nil
+        lookTouch = nil
+
+        movementVector = .zero
+        isTouchFiring = false
     }
+
+    // MARK: - UI helpers
 
     private func addLabel(
         _ text: String,
@@ -59,14 +162,20 @@ final class GameScene: SKScene {
         position: CGPoint,
         color: UIColor = .white
     ) -> SKLabelNode {
+
         let label = SKLabelNode(fontNamed: "AvenirNext-Bold")
+
         label.text = text
         label.fontSize = size
         label.fontColor = color
         label.position = position
+
         label.verticalAlignmentMode = .center
         label.horizontalAlignmentMode = .center
+        label.zPosition = 100
+
         addChild(label)
+
         return label
     }
 
@@ -74,490 +183,1033 @@ final class GameScene: SKScene {
         _ title: String,
         name: String,
         position: CGPoint,
-        size: CGSize
+        width: CGFloat,
+        height: CGFloat
     ) {
+
         let button = SKShapeNode(
-            rectOf: size,
-            cornerRadius: 14
+            rectOf: CGSize(width: width, height: height),
+            cornerRadius: 12
         )
 
         button.name = name
         button.position = position
-        button.fillColor = UIColor(red: 0.12, green: 0.48, blue: 0.22, alpha: 1)
+        button.fillColor = jungleGreen
         button.strokeColor = .white
         button.lineWidth = 2
-        button.zPosition = 100
+        button.zPosition = 110
+
         addChild(button)
 
         let label = SKLabelNode(fontNamed: "AvenirNext-Bold")
+
         label.text = title
-        label.fontSize = 20
+        label.fontSize = 17
         label.fontColor = .white
         label.verticalAlignmentMode = .center
-        label.position = .zero
         label.name = name
+
         button.addChild(label)
-    }
-
-    private func addBackground() {
-        let sky = SKShapeNode(rectOf: CGSize(width: size.width, height: size.height))
-        sky.fillColor = UIColor(red: 0.12, green: 0.32, blue: 0.18, alpha: 1)
-        sky.strokeColor = .clear
-        sky.position = CGPoint(x: size.width / 2, y: size.height / 2)
-        sky.zPosition = -20
-        addChild(sky)
-
-        let path = SKShapeNode()
-        let pathPoints = CGMutablePath()
-        pathPoints.move(to: CGPoint(x: size.width * 0.38, y: 0))
-        pathPoints.addLine(to: CGPoint(x: size.width * 0.62, y: 0))
-        pathPoints.addLine(to: CGPoint(x: size.width * 0.53, y: size.height))
-        pathPoints.addLine(to: CGPoint(x: size.width * 0.47, y: size.height))
-        pathPoints.closeSubpath()
-
-        path.path = pathPoints
-        path.fillColor = UIColor(red: 0.48, green: 0.32, blue: 0.16, alpha: 1)
-        path.strokeColor = .clear
-        path.zPosition = -10
-        addChild(path)
-
-        for side in [-1.0, 1.0] {
-            for index in 0..<9 {
-                let tree = SKShapeNode(
-                    circleOfRadius: CGFloat(18 + index * 2)
-                )
-                tree.fillColor = index % 2 == 0
-                    ? UIColor(red: 0.04, green: 0.30, blue: 0.12, alpha: 1)
-                    : UIColor(red: 0.08, green: 0.40, blue: 0.16, alpha: 1)
-
-                tree.strokeColor = .clear
-                tree.position = CGPoint(
-                    x: size.width / 2 + CGFloat(side) * CGFloat(160 + index * 12),
-                    y: CGFloat(index) * size.height / 9
-                )
-                tree.zPosition = -5
-                addChild(tree)
-            }
-        }
     }
 
     // MARK: - Menu
 
     private func showMenu() {
         clearScene()
+
         gameState = .menu
-        addBackground()
+        backgroundColor = jungleGreen
 
         addLabel(
             "BANANA BLAST",
-            size: 42,
-            position: CGPoint(x: size.width / 2, y: size.height * 0.72),
+            size: 44,
+            position: CGPoint(
+                x: size.width / 2,
+                y: size.height * 0.72
+            ),
             color: bananaYellow
         )
 
         addLabel(
-            "FIRST-PERSON JUNGLE ARCADE",
+            "JUNGLE FIRST-PERSON SHOOTER",
             size: 15,
-            position: CGPoint(x: size.width / 2, y: size.height * 0.62)
+            position: CGPoint(
+                x: size.width / 2,
+                y: size.height * 0.62
+            )
         )
 
         addLabel(
             "BEST SCORE: \(bestScore)",
-            size: 17,
-            position: CGPoint(x: size.width / 2, y: size.height * 0.49)
+            size: 18,
+            position: CGPoint(
+                x: size.width / 2,
+                y: size.height * 0.49
+            )
         )
 
         addButton(
             "PLAY",
-            name: "playButton",
-            position: CGPoint(x: size.width / 2, y: size.height * 0.34),
-            size: CGSize(width: 190, height: 60)
+            name: "play",
+            position: CGPoint(
+                x: size.width / 2,
+                y: size.height * 0.34
+            ),
+            width: 190,
+            height: 60
+        )
+
+        addLabel(
+            "DUALSENSE / DUALSHOCK SUPPORT",
+            size: 12,
+            position: CGPoint(
+                x: size.width / 2,
+                y: size.height * 0.17
+            ),
+            color: .lightGray
         )
     }
 
-    // MARK: - Game
+    // MARK: - Start game
 
     private func startGame() {
         clearScene()
+
         gameState = .playing
 
+        playerX = 2.5
+        playerY = 2.5
+        playerAngle = 0
+
         score = 0
-        coins = 0
-        health = 3
+        health = 100
+        ammo = 30
         wave = 1
-        combo = 0
 
         spawnTimer = 0
-        spawnInterval = 2.0
+        fireCooldown = 0
+        damageFlash = 0
+
         lastUpdate = 0
 
-        addBackground()
-        createHUD()
-        createHands()
+        createWorld()
+        createWeapon()
         createCrosshair()
+        createHUD()
+        createTouchControls()
+
+        spawnEnemy(at: CGPoint(x: 7.5, y: 2.5))
+        spawnEnemy(at: CGPoint(x: 8.5, y: 8.5))
+
         updateHUD()
+        renderWorld()
     }
 
-    private func createHUD() {
-        scoreLabel = addLabel(
-            "SCORE: 0",
-            size: 19,
-            position: CGPoint(x: 95, y: size.height - 38)
-        )
-        scoreLabel.horizontalAlignmentMode = .left
+    // MARK: - World rendering
 
-        waveLabel = addLabel(
-            "WAVE 1",
-            size: 19,
-            position: CGPoint(x: size.width / 2, y: size.height - 38)
-        )
+    private func createWorld() {
 
-        healthLabel = addLabel(
-            "♥ ♥ ♥",
-            size: 22,
-            position: CGPoint(x: size.width - 100, y: size.height - 38),
-            color: .systemRed
+        let ceilingPath = CGMutablePath()
+
+        ceilingPath.addRect(
+            CGRect(
+                x: 0,
+                y: size.height / 2,
+                width: size.width,
+                height: size.height / 2
+            )
         )
 
-        coinLabel = addLabel(
-            "COINS: 0",
-            size: 15,
-            position: CGPoint(x: 85, y: size.height - 65)
+        ceilingNode = SKShapeNode(path: ceilingPath)
+        ceilingNode.fillColor = UIColor(
+            red: 0.10,
+            green: 0.16,
+            blue: 0.12,
+            alpha: 1
         )
-        coinLabel.horizontalAlignmentMode = .left
+        ceilingNode.strokeColor = .clear
+        ceilingNode.zPosition = -20
 
-        comboLabel = addLabel(
-            "",
-            size: 20,
-            position: CGPoint(x: size.width / 2, y: size.height * 0.72),
-            color: bananaYellow
-        )
+        addChild(ceilingNode)
 
-        addButton(
-            "THROW",
-            name: "throwButton",
-            position: CGPoint(x: size.width - 105, y: 75),
-            size: CGSize(width: 150, height: 62)
-        )
+        let floorPath = CGMutablePath()
 
-        addButton(
-            "BURST",
-            name: "burstButton",
-            position: CGPoint(x: size.width - 270, y: 75),
-            size: CGSize(width: 105, height: 48)
+        floorPath.addRect(
+            CGRect(
+                x: 0,
+                y: 0,
+                width: size.width,
+                height: size.height / 2
+            )
         )
 
-        addButton(
-            "Ⅱ",
-            name: "pauseButton",
-            position: CGPoint(x: size.width - 35, y: size.height - 85),
-            size: CGSize(width: 48, height: 42)
+        floorNode = SKShapeNode(path: floorPath)
+        floorNode.fillColor = UIColor(
+            red: 0.24,
+            green: 0.17,
+            blue: 0.10,
+            alpha: 1
+        )
+        floorNode.strokeColor = .clear
+        floorNode.zPosition = -19
+
+        addChild(floorNode)
+
+        for _ in 0..<120 {
+            let column = SKShapeNode()
+
+            column.strokeColor = .clear
+            column.zPosition = 2
+
+            addChild(column)
+
+            wallColumns.append(column)
+        }
+
+        depthBuffer = Array(
+            repeating: 12,
+            count: wallColumns.count
         )
     }
 
-    private func createHands() {
-        let sleeve = SKShapeNode(
-            rectOf: CGSize(width: 230, height: 90),
-            cornerRadius: 30
-        )
-        sleeve.fillColor = UIColor(red: 0.35, green: 0.22, blue: 0.12, alpha: 1)
-        sleeve.strokeColor = .clear
-        sleeve.position = CGPoint(x: size.width / 2, y: 22)
-        sleeve.zPosition = 40
-        addChild(sleeve)
+    private func isWall(_ x: CGFloat, _ y: CGFloat) -> Bool {
 
-        let hand = SKShapeNode(
-            ellipseOf: CGSize(width: 115, height: 55)
-        )
-        hand.fillColor = UIColor(red: 0.77, green: 0.48, blue: 0.29, alpha: 1)
-        hand.strokeColor = .clear
-        hand.position = CGPoint(x: size.width / 2, y: 88)
-        hand.zPosition = 41
-        addChild(hand)
+        let mapX = Int(x)
+        let mapY = Int(y)
 
-        let banana = SKShapeNode(
-            ellipseOf: CGSize(width: 100, height: 27)
-        )
-        banana.fillColor = bananaYellow
-        banana.strokeColor = UIColor(red: 0.75, green: 0.53, blue: 0.05, alpha: 1)
-        banana.lineWidth = 3
-        banana.position = CGPoint(x: size.width / 2, y: 130)
-        banana.zRotation = 0.25
-        banana.zPosition = 42
-        addChild(banana)
+        if mapX < 0 || mapY < 0 ||
+            mapX >= mapWidth || mapY >= mapHeight {
+            return true
+        }
+
+        return gameMap[mapY][mapX] != 0
     }
 
-    private func createCrosshair() {
-        crosshair = SKShapeNode(circleOfRadius: 17)
-        crosshair.strokeColor = .white
-        crosshair.lineWidth = 2
-        crosshair.fillColor = .clear
-        crosshair.position = CGPoint(x: size.width / 2, y: size.height * 0.58)
-        crosshair.zPosition = 60
-        addChild(crosshair)
+    private func renderWorld() {
 
-        let horizontal = SKShapeNode(
-            rectOf: CGSize(width: 30, height: 2)
-        )
-        horizontal.fillColor = .white
-        horizontal.strokeColor = .clear
-        crosshair.addChild(horizontal)
+        guard !wallColumns.isEmpty else { return }
 
-        let vertical = SKShapeNode(
-            rectOf: CGSize(width: 2, height: 30)
-        )
-        vertical.fillColor = .white
-        vertical.strokeColor = .clear
-        crosshair.addChild(vertical)
+        let count = wallColumns.count
+        let columnWidth = size.width / CGFloat(count)
+
+        for index in 0..<count {
+
+            let rayAngle =
+                playerAngle -
+                fieldOfView / 2 +
+                (CGFloat(index) / CGFloat(count)) * fieldOfView
+
+            let rayX = cos(rayAngle)
+            let rayY = sin(rayAngle)
+
+            var distance: CGFloat = 0
+
+            while distance < 12 {
+
+                let testX = playerX + rayX * distance
+                let testY = playerY + rayY * distance
+
+                if isWall(testX, testY) {
+                    break
+                }
+
+                distance += 0.025
+            }
+
+            distance = max(distance, 0.05)
+
+            let correctedDistance = max(
+                distance * cos(rayAngle - playerAngle),
+                0.1
+            )
+
+            depthBuffer[index] = correctedDistance
+
+            let wallHeight = min(
+                size.height * 2,
+                size.height / correctedDistance
+            )
+
+            let rect = CGRect(
+                x: CGFloat(index) * columnWidth,
+                y: (size.height - wallHeight) / 2,
+                width: columnWidth + 1,
+                height: wallHeight
+            )
+
+            let path = CGMutablePath()
+            path.addRect(rect)
+
+            let shade = max(
+                0.15,
+                1.0 - correctedDistance / 10
+            )
+
+            let stripe = index % 8 < 2 ? 0.8 : 1.0
+
+            wallColumns[index].path = path
+
+            wallColumns[index].fillColor = UIColor(
+                red: 0.13 * shade * stripe,
+                green: 0.42 * shade * stripe,
+                blue: 0.17 * shade * stripe,
+                alpha: 1
+            )
+        }
+
+        renderEnemies()
     }
 
-    // MARK: - Monkeys
+    // MARK: - Monkey enemies
 
-    private func spawnMonkey() {
+    private func createMonkey() -> SKNode {
+
         let monkey = SKNode()
 
         let body = SKShapeNode(
             ellipseOf: CGSize(width: 65, height: 78)
         )
-        body.fillColor = UIColor(red: 0.40, green: 0.22, blue: 0.12, alpha: 1)
+
+        body.fillColor = UIColor(
+            red: 0.38,
+            green: 0.20,
+            blue: 0.10,
+            alpha: 1
+        )
+
         body.strokeColor = .black
         body.lineWidth = 2
+
         monkey.addChild(body)
 
         let face = SKShapeNode(
             ellipseOf: CGSize(width: 43, height: 43)
         )
-        face.fillColor = UIColor(red: 0.85, green: 0.63, blue: 0.42, alpha: 1)
+
+        face.fillColor = UIColor(
+            red: 0.85,
+            green: 0.63,
+            blue: 0.42,
+            alpha: 1
+        )
+
         face.strokeColor = .clear
         face.position = CGPoint(x: 0, y: 13)
+
         monkey.addChild(face)
 
-        for eyeX in [-9.0, 9.0] {
+        for x in [-9.0, 9.0] {
+
             let eye = SKShapeNode(circleOfRadius: 3)
+
             eye.fillColor = .black
             eye.strokeColor = .clear
-            eye.position = CGPoint(x: eyeX, y: 17)
-            monkey.addChild(eye)
+            eye.position = CGPoint(x: x, y: 17)
+
+            face.addChild(eye)
         }
 
         let mouth = SKShapeNode(
             ellipseOf: CGSize(width: 15, height: 5)
         )
+
         mouth.fillColor = .black
         mouth.strokeColor = .clear
         mouth.position = CGPoint(x: 0, y: 2)
-        monkey.addChild(mouth)
 
-        let tail = SKShapeNode()
-        let tailPath = CGMutablePath()
-        tailPath.move(to: CGPoint(x: 28, y: -12))
-        tailPath.addQuadCurve(
-            to: CGPoint(x: 48, y: 25),
-            control: CGPoint(x: 65, y: -2)
-        )
-        tail.path = tailPath
-        tail.strokeColor = body.fillColor
-        tail.lineWidth = 7
-        tail.fillColor = .clear
-        monkey.addChild(tail)
+        face.addChild(mouth)
 
-        let hp = wave >= 5 ? 2 : 1
-        monkey.userData = NSMutableDictionary()
-        monkey.userData?["hp"] = hp
-        monkey.userData?["speed"] = CGFloat(65 + wave * 7)
+        let earLeft = SKShapeNode(circleOfRadius: 9)
+        earLeft.fillColor = body.fillColor
+        earLeft.strokeColor = .clear
+        earLeft.position = CGPoint(x: -25, y: 27)
 
-        monkey.position = CGPoint(
-            x: size.width / 2 + CGFloat.random(in: -75...75),
-            y: size.height * 0.72
-        )
-        monkey.setScale(0.45)
+        monkey.addChild(earLeft)
+
+        let earRight = SKShapeNode(circleOfRadius: 9)
+        earRight.fillColor = body.fillColor
+        earRight.strokeColor = .clear
+        earRight.position = CGPoint(x: 25, y: 27)
+
+        monkey.addChild(earRight)
+
+        return monkey
+    }
+
+    private func spawnEnemy(at position: CGPoint) {
+
+        let monkey = createMonkey()
+
         monkey.zPosition = 20
 
         addChild(monkey)
-        monkeys.append(monkey)
-    }
 
-    // MARK: - Throwing
-
-    private func throwBanana(burst: Bool = false) {
-        guard gameState == .playing else { return }
-
-        let banana = SKShapeNode(
-            ellipseOf: CGSize(width: burst ? 28 : 20, height: burst ? 12 : 9)
-        )
-        banana.fillColor = bananaYellow
-        banana.strokeColor = .orange
-        banana.position = CGPoint(x: size.width / 2, y: 145)
-        banana.zRotation = 0.3
-        banana.zPosition = 70
-
-        addChild(banana)
-        bananas.append(banana)
-
-        let target = crosshair.position
-        let travelPoint = CGPoint(
-            x: target.x,
-            y: min(target.y, size.height * 0.8)
+        let enemy = Enemy(
+            x: position.x,
+            y: position.y,
+            node: monkey
         )
 
-        let move = SKAction.move(to: travelPoint, duration: 0.22)
-        let finish = SKAction.run { [weak self, weak banana] in
-            guard let self = self, let banana = banana else { return }
-            self.hitMonkeys(at: travelPoint, burst: burst)
-            banana.removeFromParent()
-            self.bananas.removeAll { $0 === banana }
-        }
+        enemy.hp = wave >= 4 ? 3 : 2
 
-        banana.run(SKAction.sequence([move, finish]))
-        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        enemies.append(enemy)
     }
 
-    private func hitMonkeys(at point: CGPoint, burst: Bool) {
-        let radius: CGFloat = burst ? 125 : 55
-        var hitSomething = false
+    private func spawnRandomEnemy() {
 
-        for monkey in monkeys.reversed() {
-            let distance = hypot(
-                monkey.position.x - point.x,
-                monkey.position.y - point.y
-            )
+        for _ in 0..<40 {
 
-            guard distance < radius else { continue }
+            let x = CGFloat(Int.random(in: 1...10)) + 0.5
+            let y = CGFloat(Int.random(in: 1...10)) + 0.5
 
-            hitSomething = true
-
-            var hp = monkey.userData?["hp"] as? Int ?? 1
-            hp -= 1
-            monkey.userData?["hp"] = hp
-
-            if hp <= 0 {
-                monkey.removeFromParent()
-                monkeys.removeAll { $0 === monkey }
-
-                combo += 1
-                score += 10 * min(combo, 5)
-                coins += 2
-
-                comboLabel.text = combo >= 2 ? "\(combo) COMBO!" : ""
-                comboLabel.run(
-                    SKAction.sequence([
-                        SKAction.scale(to: 1.3, duration: 0.1),
-                        SKAction.scale(to: 1.0, duration: 0.1)
-                    ])
-                )
-            } else {
-                monkey.run(
-                    SKAction.sequence([
-                        SKAction.scale(to: 0.6, duration: 0.08),
-                        SKAction.scale(to: 0.45, duration: 0.08)
-                    ])
-                )
+            if isWall(x, y) {
+                continue
             }
 
-            if !burst { break }
-        }
+            let distance = hypot(
+                x - playerX,
+                y - playerY
+            )
 
-        if !hitSomething {
-            combo = 0
-            comboLabel.text = ""
+            if distance > 4 {
+                spawnEnemy(
+                    at: CGPoint(x: x, y: y)
+                )
+                return
+            }
         }
+    }
 
-        updateHUD()
+    private func renderEnemies() {
+
+        let columnWidth = size.width / CGFloat(wallColumns.count)
+
+        for enemy in enemies {
+
+            let dx = enemy.x - playerX
+            let dy = enemy.y - playerY
+
+            let distance = hypot(dx, dy)
+
+            var angle = atan2(dy, dx) - playerAngle
+
+            while angle > .pi {
+                angle -= .pi * 2
+            }
+
+            while angle < -.pi {
+                angle += .pi * 2
+            }
+
+            guard abs(angle) < fieldOfView / 2 else {
+                enemy.node.isHidden = true
+                continue
+            }
+
+            let screenX =
+                (angle / fieldOfView + 0.5) * size.width
+
+            let column = min(
+                wallColumns.count - 1,
+                max(0, Int(screenX / columnWidth))
+            )
+
+            if distance > depthBuffer[column] + 0.1 {
+                enemy.node.isHidden = true
+                continue
+            }
+
+            enemy.node.isHidden = false
+
+            let scale = min(
+                2.0,
+                max(0.08, 1.0 / distance)
+            )
+
+            enemy.node.position = CGPoint(
+                x: screenX,
+                y: size.height / 2
+            )
+
+            enemy.node.setScale(scale)
+        }
+    }
+
+    // MARK: - Banana weapon
+
+    private func createWeapon() {
+
+        weaponNode = SKNode()
+
+        weaponNode.position = CGPoint(
+            x: size.width / 2,
+            y: 90
+        )
+
+        weaponNode.zPosition = 50
+
+        addChild(weaponNode)
+
+        let launcher = SKShapeNode(
+            rectOf: CGSize(width: 105, height: 85),
+            cornerRadius: 16
+        )
+
+        launcher.fillColor = UIColor(
+            red: 0.35,
+            green: 0.20,
+            blue: 0.10,
+            alpha: 1
+        )
+
+        launcher.strokeColor = .black
+        launcher.lineWidth = 3
+
+        weaponNode.addChild(launcher)
+
+        let banana = SKShapeNode(
+            ellipseOf: CGSize(width: 100, height: 27)
+        )
+
+        banana.fillColor = bananaYellow
+        banana.strokeColor = UIColor(
+            red: 0.72,
+            green: 0.48,
+            blue: 0.04,
+            alpha: 1
+        )
+
+        banana.lineWidth = 3
+        banana.position = CGPoint(x: 0, y: 50)
+        banana.zRotation = 0.2
+
+        weaponNode.addChild(banana)
+
+        let grip = SKShapeNode(
+            rectOf: CGSize(width: 35, height: 48),
+            cornerRadius: 8
+        )
+
+        grip.fillColor = UIColor.darkGray
+        grip.strokeColor = .black
+        grip.position = CGPoint(x: 0, y: -60)
+
+        weaponNode.addChild(grip)
+    }
+
+    private func animateWeapon() {
+
+        weaponNode.removeAction(forKey: "fire")
+
+        let recoil = SKAction.moveBy(
+            x: 0,
+            y: -18,
+            duration: 0.06
+        )
+
+        let returnAction = SKAction.moveBy(
+            x: 0,
+            y: 18,
+            duration: 0.12
+        )
+
+        weaponNode.run(
+            SKAction.sequence([
+                recoil,
+                returnAction
+            ]),
+            withKey: "fire"
+        )
+    }
+
+    // MARK: - Crosshair
+
+    private func createCrosshair() {
+
+        crosshair = SKShapeNode(circleOfRadius: 9)
+
+        crosshair.strokeColor = .white
+        crosshair.fillColor = .clear
+        crosshair.lineWidth = 2
+
+        crosshair.position = CGPoint(
+            x: size.width / 2,
+            y: size.height / 2
+        )
+
+        crosshair.zPosition = 80
+
+        addChild(crosshair)
+
+        let horizontal = SKShapeNode(
+            rectOf: CGSize(width: 25, height: 2)
+        )
+
+        horizontal.fillColor = .white
+        horizontal.strokeColor = .clear
+
+        crosshair.addChild(horizontal)
+
+        let vertical = SKShapeNode(
+            rectOf: CGSize(width: 2, height: 25)
+        )
+
+        vertical.fillColor = .white
+        vertical.strokeColor = .clear
+
+        crosshair.addChild(vertical)
     }
 
     // MARK: - HUD
 
-    private func updateHUD() {
-        scoreLabel?.text = "SCORE: \(score)"
-        waveLabel?.text = "WAVE \(wave)"
-        coinLabel?.text = "COINS: \(coins)"
+    private func createHUD() {
 
-        let hearts = String(repeating: "♥ ", count: max(0, health))
-        healthLabel?.text = hearts.isEmpty ? "0 ♥" : hearts
+        scoreLabel = addLabel(
+            "SCORE: 0",
+            size: 17,
+            position: CGPoint(x: 95, y: size.height - 30)
+        )
+
+        healthLabel = addLabel(
+            "HEALTH: 100",
+            size: 17,
+            position: CGPoint(x: 105, y: size.height - 58),
+            color: .systemGreen
+        )
+
+        waveLabel = addLabel(
+            "WAVE 1",
+            size: 18,
+            position: CGPoint(
+                x: size.width / 2,
+                y: size.height - 30
+            ),
+            color: bananaYellow
+        )
+
+        ammoLabel = addLabel(
+            "AMMO: 30",
+            size: 18,
+            position: CGPoint(
+                x: size.width - 100,
+                y: size.height - 30
+            ),
+            color: bananaYellow
+        )
     }
 
-    // MARK: - Pause / Game Over
+    private func updateHUD() {
+
+        scoreLabel?.text = "SCORE: \(score)"
+        healthLabel?.text = "HEALTH: \(health)"
+        ammoLabel?.text = "AMMO: \(ammo)"
+        waveLabel?.text = "WAVE \(wave)"
+    }
+
+    // MARK: - Touch controls
+
+    private func createTouchControls() {
+
+        joystickBase = SKShapeNode(circleOfRadius: 58)
+
+        joystickBase.position = CGPoint(
+            x: 85,
+            y: 95
+        )
+
+        joystickBase.fillColor = UIColor.white.withAlphaComponent(0.12)
+        joystickBase.strokeColor = UIColor.white.withAlphaComponent(0.6)
+        joystickBase.lineWidth = 2
+        joystickBase.zPosition = 90
+
+        addChild(joystickBase)
+
+        joystickKnob = SKShapeNode(circleOfRadius: 25)
+
+        joystickKnob.fillColor = UIColor.white.withAlphaComponent(0.35)
+        joystickKnob.strokeColor = .white
+        joystickKnob.lineWidth = 2
+        joystickKnob.zPosition = 91
+
+        joystickBase.addChild(joystickKnob)
+
+        addButton(
+            "FIRE",
+            name: "fire",
+            position: CGPoint(
+                x: size.width - 85,
+                y: 95
+            ),
+            width: 105,
+            height: 60
+        )
+
+        addButton(
+            "RELOAD",
+            name: "reload",
+            position: CGPoint(
+                x: size.width - 205,
+                y: 95
+            ),
+            width: 100,
+            height: 48
+        )
+
+        addButton(
+            "Ⅱ",
+            name: "pause",
+            position: CGPoint(
+                x: size.width - 40,
+                y: size.height - 75
+            ),
+            width: 48,
+            height: 42
+        )
+
+        addLabel(
+            "MOVE",
+            size: 11,
+            position: CGPoint(x: 85, y: 22),
+            color: .lightGray
+        )
+
+        addLabel(
+            "DRAG RIGHT SIDE TO TURN",
+            size: 11,
+            position: CGPoint(
+                x: size.width * 0.62,
+                y: 25
+            ),
+            color: .lightGray
+        )
+    }
+
+    // MARK: - Movement and collision
+
+    private func movePlayer(forward: CGFloat, sideways: CGFloat) {
+
+        let speed: CGFloat = 3.0
+
+        let dx =
+            cos(playerAngle) * forward * speed +
+            cos(playerAngle + .pi / 2) * sideways * speed
+
+        let dy =
+            sin(playerAngle) * forward * speed +
+            sin(playerAngle + .pi / 2) * sideways * speed
+
+        let nextX = playerX + dx
+        let nextY = playerY + dy
+
+        if !isWall(nextX, playerY) {
+            playerX = nextX
+        }
+
+        if !isWall(playerX, nextY) {
+            playerY = nextY
+        }
+    }
+
+    // MARK: - Shooting
+
+    private func shootBanana(special: Bool = false) {
+
+        guard gameState == .playing else { return }
+        guard fireCooldown <= 0 else { return }
+
+        guard ammo > 0 else {
+            reload()
+            return
+        }
+
+        ammo -= 1
+
+        fireCooldown = special ? 0.45 : 0.22
+
+        animateWeapon()
+
+        let targetAngle = playerAngle
+
+        var bestEnemy: Enemy?
+        var bestDistance: CGFloat = 999
+
+        for enemy in enemies {
+
+            let dx = enemy.x - playerX
+            let dy = enemy.y - playerY
+
+            let distance = hypot(dx, dy)
+
+            var angle = atan2(dy, dx) - targetAngle
+
+            while angle > .pi {
+                angle -= .pi * 2
+            }
+
+            while angle < -.pi {
+                angle += .pi * 2
+            }
+
+            let aimTolerance: CGFloat = special ? 0.24 : 0.13
+
+            if abs(angle) < aimTolerance && distance < bestDistance {
+
+                bestDistance = distance
+                bestEnemy = enemy
+            }
+        }
+
+        if let enemy = bestEnemy {
+
+            enemy.hp -= special ? 2 : 1
+
+            enemy.node.run(
+                SKAction.sequence([
+                    SKAction.scale(to: 1.15, duration: 0.05),
+                    SKAction.scale(to: 1.0, duration: 0.08)
+                ])
+            )
+
+            if enemy.hp <= 0 {
+
+                enemy.node.removeFromParent()
+                enemies.removeAll { $0 === enemy }
+
+                score += 25
+
+                updateHUD()
+            }
+        }
+
+        updateHUD()
+
+        UIImpactFeedbackGenerator(
+            style: .medium
+        ).impactOccurred()
+    }
+
+    private func reload() {
+
+        guard ammo < 30 else { return }
+
+        ammo = 30
+
+        weaponNode.run(
+            SKAction.sequence([
+                SKAction.rotate(byAngle: 0.12, duration: 0.12),
+                SKAction.rotate(byAngle: -0.12, duration: 0.12)
+            ])
+        )
+
+        updateHUD()
+    }
+
+    // MARK: - Controller support
+
+    private func updateController(delta: CGFloat) {
+
+        guard let controller = GCController.controllers().first,
+              let pad = controller.extendedGamepad else {
+            return
+        }
+
+        let leftX = CGFloat(pad.leftThumbstick.xAxis.value)
+        let leftY = CGFloat(pad.leftThumbstick.yAxis.value)
+
+        let rightX = CGFloat(pad.rightThumbstick.xAxis.value)
+
+        let deadZone: CGFloat = 0.16
+
+        let forward = abs(leftY) > deadZone ? leftY : 0
+        let sideways = abs(leftX) > deadZone ? leftX : 0
+
+        movePlayer(
+            forward: forward,
+            sideways: sideways
+        )
+
+        if abs(rightX) > deadZone {
+
+            playerAngle += rightX * delta * 2.8
+        }
+
+        let firePressed = pad.rightTrigger.value > 0.35
+
+        if firePressed {
+            shootBanana()
+        }
+
+        let specialPressed = pad.leftTrigger.value > 0.5
+
+        if specialPressed && !previousSpecial {
+            shootBanana(special: true)
+        }
+
+        let reloadPressed = pad.buttonX.isPressed
+
+        if reloadPressed && !previousReload {
+            reload()
+        }
+
+        let pausePressed = pad.buttonMenu.isPressed
+
+        if pausePressed && !previousPause {
+
+            if gameState == .playing {
+                showPause()
+            } else if gameState == .paused {
+                resumeGame()
+            }
+        }
+
+        previousFire = firePressed
+        previousSpecial = specialPressed
+        previousReload = reloadPressed
+        previousPause = pausePressed
+    }
+
+    // MARK: - Pause
 
     private func showPause() {
+
         guard gameState == .playing else { return }
+
         gameState = .paused
 
         let overlay = SKShapeNode(
-            rectOf: CGSize(width: size.width, height: size.height)
+            rectOf: CGSize(
+                width: size.width,
+                height: size.height
+            )
         )
+
         overlay.name = "pauseOverlay"
-        overlay.fillColor = UIColor.black.withAlphaComponent(0.75)
+        overlay.fillColor = UIColor.black.withAlphaComponent(0.8)
         overlay.strokeColor = .clear
+        overlay.position = CGPoint(
+            x: size.width / 2,
+            y: size.height / 2
+        )
         overlay.zPosition = 200
-        overlay.position = CGPoint(x: size.width / 2, y: size.height / 2)
+
         addChild(overlay)
 
         let title = SKLabelNode(fontNamed: "AvenirNext-Bold")
+
         title.text = "PAUSED"
         title.fontSize = 42
-        title.fontColor = .white
-        title.position = CGPoint(x: size.width / 2, y: size.height * 0.6)
-        title.name = "resumeButton"
+        title.position = CGPoint(
+            x: size.width / 2,
+            y: size.height * 0.60
+        )
         title.zPosition = 201
+
         addChild(title)
 
         addButton(
             "RESUME",
-            name: "resumeButton",
-            position: CGPoint(x: size.width / 2, y: size.height * 0.4),
-            size: CGSize(width: 180, height: 60)
+            name: "resume",
+            position: CGPoint(
+                x: size.width / 2,
+                y: size.height * 0.40
+            ),
+            width: 180,
+            height: 60
         )
     }
 
+    private func resumeGame() {
+
+        childNode(withName: "pauseOverlay")?.removeFromParent()
+
+        children
+            .filter { $0.zPosition >= 200 }
+            .forEach { $0.removeFromParent() }
+
+        gameState = .playing
+    }
+
+    // MARK: - Game over
+
     private func endGame() {
+
         gameState = .gameOver
 
         bestScore = max(bestScore, score)
-        UserDefaults.standard.set(bestScore, forKey: "bananaBlastBest")
+
+        UserDefaults.standard.set(
+            bestScore,
+            forKey: "bananaBlastBest"
+        )
 
         let overlay = SKShapeNode(
-            rectOf: CGSize(width: size.width, height: size.height)
+            rectOf: CGSize(
+                width: size.width,
+                height: size.height
+            )
         )
-        overlay.fillColor = UIColor.black.withAlphaComponent(0.82)
+
+        overlay.fillColor = UIColor.black.withAlphaComponent(0.88)
         overlay.strokeColor = .clear
+        overlay.position = CGPoint(
+            x: size.width / 2,
+            y: size.height / 2
+        )
         overlay.zPosition = 200
-        overlay.position = CGPoint(x: size.width / 2, y: size.height / 2)
+
         addChild(overlay)
 
         let title = SKLabelNode(fontNamed: "AvenirNext-Bold")
+
         title.text = "GAME OVER"
         title.fontSize = 42
         title.fontColor = .systemRed
-        title.position = CGPoint(x: size.width / 2, y: size.height * 0.65)
+        title.position = CGPoint(
+            x: size.width / 2,
+            y: size.height * 0.65
+        )
         title.zPosition = 201
+
         addChild(title)
 
         let result = SKLabelNode(fontNamed: "AvenirNext-Bold")
+
         result.text = "SCORE: \(score)   BEST: \(bestScore)"
-        result.fontSize = 20
-        result.fontColor = .white
-        result.position = CGPoint(x: size.width / 2, y: size.height * 0.53)
+        result.fontSize = 19
+        result.position = CGPoint(
+            x: size.width / 2,
+            y: size.height * 0.52
+        )
         result.zPosition = 201
+
         addChild(result)
 
         addButton(
             "PLAY AGAIN",
-            name: "replayButton",
-            position: CGPoint(x: size.width / 2, y: size.height * 0.36),
-            size: CGSize(width: 210, height: 60)
+            name: "replay",
+            position: CGPoint(
+                x: size.width / 2,
+                y: size.height * 0.36
+            ),
+            width: 210,
+            height: 60
         )
     }
 
-    // MARK: - Touches
+    // MARK: - Touch handling
 
     private func buttonName(at point: CGPoint) -> String? {
+
         for node in nodes(at: point) {
+
             var current: SKNode? = node
 
             while let item = current {
+
                 if let name = item.name {
                     return name
                 }
+
                 current = item.parent
             }
         }
@@ -569,37 +1221,52 @@ final class GameScene: SKScene {
         _ touches: Set<UITouch>,
         with event: UIEvent?
     ) {
+
         guard let touch = touches.first else { return }
+
         let point = touch.location(in: self)
 
         switch buttonName(at: point) {
-        case "playButton", "replayButton":
+
+        case "play", "replay":
             startGame()
+            return
 
-        case "throwButton":
-            throwBanana()
+        case "fire":
+            isTouchFiring = true
+            shootBanana()
+            return
 
-        case "burstButton":
-            throwBanana(burst: true)
+        case "reload":
+            reload()
+            return
 
-        case "pauseButton":
+        case "pause":
             showPause()
+            return
 
-        case "resumeButton":
-            if gameState == .paused {
-                childNode(withName: "pauseOverlay")?.removeFromParent()
-                children
-                    .filter { $0.zPosition >= 200 }
-                    .forEach { $0.removeFromParent() }
-                gameState = .playing
-            }
+        case "resume":
+            resumeGame()
+            return
 
         default:
-            if gameState == .playing {
-                aimPoint = point
-                crosshair.position = point
-                throwBanana()
-            }
+            break
+        }
+
+        guard gameState == .playing else { return }
+
+        if point.x < size.width * 0.35 && movementTouch == nil {
+
+            movementTouch = touch
+            movementOrigin = point
+
+            joystickBase.position = point
+            joystickKnob.position = .zero
+
+        } else if lookTouch == nil {
+
+            lookTouch = touch
+            lastLookPoint = point
         }
     }
 
@@ -607,52 +1274,187 @@ final class GameScene: SKScene {
         _ touches: Set<UITouch>,
         with event: UIEvent?
     ) {
-        guard gameState == .playing,
-              let touch = touches.first else { return }
 
-        let point = touch.location(in: self)
+        guard gameState == .playing else { return }
 
-        if point.y > 120 && point.y < size.height - 90 {
-            crosshair.position = point
+        for touch in touches {
+
+            let point = touch.location(in: self)
+
+            if touch === movementTouch {
+
+                let dx = point.x - movementOrigin.x
+                let dy = point.y - movementOrigin.y
+
+                let length = max(
+                    1,
+                    hypot(dx, dy)
+                )
+
+                let limit: CGFloat = 45
+
+                let scale = min(
+                    1,
+                    limit / length
+                )
+
+                let adjustedX = dx * scale
+                let adjustedY = dy * scale
+
+                joystickKnob.position = CGPoint(
+                    x: adjustedX,
+                    y: adjustedY
+                )
+
+                movementVector = CGPoint(
+                    x: adjustedX / limit,
+                    y: adjustedY / limit
+                )
+            }
+
+            if touch === lookTouch {
+
+                let dx = point.x - lastLookPoint.x
+
+                playerAngle += dx * 0.006
+
+                lastLookPoint = point
+            }
         }
+    }
+
+    override func touchesEnded(
+        _ touches: Set<UITouch>,
+        with event: UIEvent?
+    ) {
+
+        for touch in touches {
+
+            if touch === movementTouch {
+
+                movementTouch = nil
+                movementVector = .zero
+
+                joystickKnob.position = .zero
+            }
+
+            if touch === lookTouch {
+                lookTouch = nil
+            }
+        }
+
+        isTouchFiring = false
+    }
+
+    override func touchesCancelled(
+        _ touches: Set<UITouch>,
+        with event: UIEvent?
+    ) {
+
+        touchesEnded(touches, with: event)
     }
 
     // MARK: - Update
 
     override func update(_ currentTime: TimeInterval) {
+
         guard gameState == .playing else { return }
 
         if lastUpdate == 0 {
             lastUpdate = currentTime
         }
 
-        let delta = min(currentTime - lastUpdate, 0.05)
+        let delta = CGFloat(
+            min(currentTime - lastUpdate, 0.05)
+        )
+
         lastUpdate = currentTime
+
+        fireCooldown = max(0, fireCooldown - delta)
+
+        if movementTouch != nil {
+
+            movePlayer(
+                forward: movementVector.y,
+                sideways: movementVector.x
+            )
+        }
+
+        updateController(delta: delta)
+
+        if isTouchFiring {
+            shootBanana()
+        }
+
+        updateEnemies(delta: delta)
 
         spawnTimer += delta
 
+        let spawnInterval = max(
+            0.8,
+            3.0 - CGFloat(wave) * 0.15
+        )
+
         if spawnTimer >= spawnInterval {
+
             spawnTimer = 0
-            spawnMonkey()
+
+            if enemies.count < 8 {
+                spawnRandomEnemy()
+            }
         }
 
-        for monkey in monkeys {
-            let speed = monkey.userData?["speed"] as? CGFloat ?? 70
-            monkey.position.y -= speed * CGFloat(delta)
+        if score >= wave * 100 {
 
-            let progress = max(
-                0.0,
-                min(1.0, 1.0 - monkey.position.y / size.height)
+            wave += 1
+
+            updateHUD()
+        }
+
+        if damageFlash > 0 {
+            damageFlash -= delta
+        }
+
+        renderWorld()
+    }
+
+    // MARK: - Enemy AI
+
+    private func updateEnemies(delta: CGFloat) {
+
+        for enemy in enemies {
+
+            let dx = playerX - enemy.x
+            let dy = playerY - enemy.y
+
+            let distance = max(
+                0.01,
+                hypot(dx, dy)
             )
-            monkey.setScale(0.45 + progress * 0.65)
 
-            if monkey.position.y < 125 {
-                monkey.removeFromParent()
-                monkeys.removeAll { $0 === monkey }
+            enemy.attackTimer -= delta
 
-                health -= 1
-                combo = 0
-                comboLabel.text = ""
+            if distance > 1.15 {
+
+                let speed: CGFloat = 0.7
+
+                let stepX = (dx / distance) * speed * delta
+                let stepY = (dy / distance) * speed * delta
+
+                if !isWall(enemy.x + stepX, enemy.y) {
+                    enemy.x += stepX
+                }
+
+                if !isWall(enemy.x, enemy.y + stepY) {
+                    enemy.y += stepY
+                }
+
+            } else if enemy.attackTimer <= 0 {
+
+                health = max(0, health - 8)
+
+                enemy.attackTimer = 1.2
+
                 updateHUD()
 
                 if health <= 0 {
@@ -660,14 +1462,6 @@ final class GameScene: SKScene {
                     return
                 }
             }
-        }
-
-        let newWave = score / 100 + 1
-
-        if newWave > wave {
-            wave = newWave
-            spawnInterval = max(0.65, 2.0 - Double(wave) * 0.12)
-            updateHUD()
         }
     }
 }
