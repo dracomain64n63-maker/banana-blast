@@ -1,5 +1,5 @@
 
-name: Build BANANA BLAST
+name: Build BANANA BLAST IPA
 
 on:
   workflow_dispatch:
@@ -12,28 +12,20 @@ jobs:
     runs-on: macos-15
 
     steps:
-      - name: Get game files
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Install XcodeGen
         run: brew install xcodegen
 
-      - name: Generate Xcode project
+      - name: Generate project
         run: xcodegen generate
-
-      - name: Find project and scheme
-        run: |
-          PROJECT=$(find . -maxdepth 2 -name "*.xcodeproj" -print -quit)
-          echo "PROJECT=$PROJECT" >> "$GITHUB_ENV"
-          xcodebuild -list -json -project "$PROJECT" > xcode-list.json
-          SCHEME=$(python3 -c "import json; d=json.load(open('xcode-list.json')); print(d['project']['schemes'][0])")
-          echo "SCHEME=$SCHEME" >> "$GITHUB_ENV"
 
       - name: Build iOS app
         run: |
           xcodebuild \
-            -project "$PROJECT" \
-            -scheme "$SCHEME" \
+            -project BANANA-BLAST.xcodeproj \
+            -scheme BANANA-BLAST \
             -configuration Release \
             -sdk iphoneos \
             -destination 'generic/platform=iOS' \
@@ -41,14 +33,14 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             build
 
-      - name: Package app
+      - name: Package IPA
         run: |
-          APP=$(find build/Build/Products/Release-iphoneos -maxdepth 1 -name "*.app" -print -quit)
-          cd "$(dirname "$APP")"
-          zip -r "$GITHUB_WORKSPACE/BANANA-BLAST-unsigned.zip" "$(basename "$APP")"
+          mkdir -p Payload
+          cp -R build/Build/Products/Release-iphoneos/BANANA-BLAST.app Payload/
+          zip -r BANANA-BLAST.ipa Payload
 
-      - name: Upload build
+      - name: Upload IPA
         uses: actions/upload-artifact@v4
         with:
-          name: BANANA-BLAST-unsigned
-          path: BANANA-BLAST-unsigned.zip
+          name: BANANA-BLAST-IPA
+          path: BANANA-BLAST.ipa
